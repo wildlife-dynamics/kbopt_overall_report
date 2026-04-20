@@ -1,12 +1,2076 @@
-id:  # Unique workflow identifier (kebab-case)
-requirements: # Package dependencies with channels
+id: overall_report
+requirements:
   - name: ecoscope-workflows-core
-    version: "0.18.0"
+    version: "0.22.17.*"
     channel: https://repo.prefix.dev/ecoscope-workflows/
 
-# List of tasks in execution order
+  - name: ecoscope-workflows-ext-ecoscope
+    version: "0.22.17.*"
+    channel: https://repo.prefix.dev/ecoscope-workflows/
+
+  - name: ecoscope-workflows-ext-custom
+    version: "0.0.39.*"
+    channel: https://repo.prefix.dev/ecoscope-workflows-custom/
+
+  - name: ecoscope-workflows-ext-ste
+    version: "0.0.18.*"
+    channel: https://repo.prefix.dev/ecoscope-workflows-custom/
+
+  - name: ecoscope-workflows-ext-mnc
+    version: "0.0.8.*"
+    channel: https://repo.prefix.dev/ecoscope-workflows-custom/
+
+  - name: ecoscope-workflows-ext-ate
+    version: "0.0.3.*"
+    channel: https://repo.prefix.dev/ecoscope-workflows-custom/
+
+  - name: ecoscope-workflows-ext-big-life
+    version: "0.0.8.*"
+    channel: https://repo.prefix.dev/ecoscope-workflows-custom/
+
+  - name: ecoscope-workflows-ext-kbopt
+    version: "0.0.6.*"
+    channel: https://repo.prefix.dev/ecoscope-workflows-custom/
+
+task-instance-defaults:
+  skipif:
+    conditions:
+      - any_is_empty_df
+      - any_dependency_skipped
+
 workflow:
-  - name:  # Display name used for the configuration form UI
-    description:  # Description used for the configuration form
-    id:  # Unique task identifier (snake_case)
-    task:  # Function name from task library
+  - name: Set Workflow Details
+    id: workflow_details
+    task: set_workflow_details
+
+  - name: Time range
+    id: time_range
+    task: set_time_range
+
+  - name: Extract Timezone Selection
+    id: get_timezone
+    task: get_timezone_from_time_range
+    partial:
+      time_range: ${{ workflow.time_range.return }}
+
+  - name: Set groupers
+    id: groupers
+    task: set_groupers
+    partial:
+      groupers:
+        - spatial_index_name: "Conservation Name"
+        
+  - name: Connect to ER 
+    id: er_client_name
+    task: set_er_connection
+
+  # Set base maps
+  - name: Base Maps
+    id: configure_base_maps
+    task: set_base_maps_pydeck
+    partial: 
+      base_maps:
+        - url: >-
+            https://server.arcgisonline.com/arcgis/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}
+          opacity: 1
+          max_zoom: 20
+        - url: >-
+            https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}
+          opacity: 0.04
+          max_zoom: 20
+
+  - name: Set time range from 2000-01-01 to until
+    id: overall_time_range 
+    task: get_time_range_to_until
+    partial: 
+      time_range: ${{ workflow.time_range.return }}
+
+  - name: Get time range from 2000-01-01 to since in time range 
+    id: previous_time_range
+    task: get_time_range_before_since
+    partial: 
+      time_range: ${{ workflow.time_range.return }}
+
+  - name: Download KBOPT geoparquet file
+    id: persist_kbopt_gpq
+    task: fetch_and_persist_file
+    partial: 
+      url: https://www.dropbox.com/scl/fi/i476ltynyt7zimi8zb8f2/kbopt_.geoparquet?rlkey=50dmzukcqj2x5kzqjj7eyc8no&st=bfawmyer&dl=0
+      output_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      overwrite_existing: false
+      retries: 3
+      unzip: false
+
+  - name: Download KBOPT logo image for html
+    id: persist_kbopt_logo
+    task: fetch_and_persist_file
+    partial: 
+      url: https://www.dropbox.com/scl/fi/1f2z6er8f06jj9rrhlac2/kbopt?rlkey=enpczqy88e1uidag1m4bqmske&st=gzdsj2lp&dl=0
+      output_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      overwrite_existing: false
+      retries: 3
+      unzip: false
+
+  - name: Load kbopt geoparquet file 
+    id: load_kbopt_gpq
+    task: load_df 
+    partial: 
+      file_path: ${{ workflow.persist_kbopt_gpq.return }}
+      layer: null
+      deserialize_json: false 
+  
+  - name: Reproject gdf to 4326 for kbopt boundaries
+    id: reproject_kbopt_gpq
+    task: reproject_gdf
+    partial: 
+      gdf: ${{ workflow.load_kbopt_gpq.return }}
+      target_crs: "EPSG:4326"
+
+  - name: Filter loaded kbopt gdf by AOI 
+    id: filter_kbopt_aoi 
+    task: filter_row_values 
+    partial: 
+      df: ${{ workflow.reproject_kbopt_gpq.return }}
+      column: "Conservation Name"
+      values: 
+        - "Mara Triangle"
+        - "Naboisho"
+        - "Maasai Mara National Reserve"
+
+  - name: Convert kbopt GDF to regions format
+    id: kbopt_regions_gdf
+    task: convert_kbopt_to_regions_gdf
+    partial:
+      gdf: ${{ workflow.filter_kbopt_aoi.return }}
+      name_column: "Conservation Name"
+
+  - name: Resolve spatial groupers with kbopt regions
+    id: resolved_groupers
+    task: resolve_spatial_feature_groups_for_spatial_groupers
+    skipif:
+      conditions:
+        - never
+    partial:
+      groupers: ${{ workflow.groupers.return }}
+      spatial_feature_groups: ${{ workflow.kbopt_regions_gdf.return }}
+
+  - name: Retrieve all nest id events to date 
+    id: retrieve_nest_ids 
+    task: get_events 
+    partial: 
+      client: ${{ workflow.er_client_name.return }}
+      time_range: ${{ workflow.overall_time_range.return }}
+      event_columns:
+        - id
+        - time
+        - event_type
+        - event_category
+        - reported_by
+        - serial_number
+        - geometry
+        - created_at
+        - event_details
+      event_types:
+        - nest_id
+      raise_on_empty: false
+      include_details: true
+      include_updates: false
+      include_related_events: false
+      include_null_geometry: false
+      include_display_values: false
+
+  - name: Retrieve all nest checks before hand until since 
+    id: retrieve_previous_nest_events 
+    task: get_events
+    partial:
+      client: ${{ workflow.er_client_name.return }}
+      time_range: ${{ workflow.previous_time_range.return }}
+      event_columns:
+        - id
+        - time
+        - event_type
+        - event_category
+        - reported_by
+        - serial_number
+        - geometry
+        - created_at
+        - event_details
+      event_types:
+        - nest_check 
+      raise_on_empty: false
+      include_details: true
+      include_updates: false
+      include_related_events: false
+      include_null_geometry: false
+      include_display_values: false
+
+  - name: Retrieve nest check events 
+    id: get_events_data 
+    task: get_events 
+    partial: 
+      client: ${{ workflow.er_client_name.return }}
+      time_range: ${{ workflow.time_range.return }}
+      event_columns:
+        - id
+        - time
+        - event_type
+        - event_category
+        - reported_by
+        - serial_number
+        - geometry
+        - created_at
+        - event_details
+      event_types:
+        - nest_check 
+      raise_on_empty: false
+      include_details: true
+      include_updates: false
+      include_related_events: false
+      include_null_geometry: false
+      include_display_values: false
+
+  - name: Process current nest_check events details
+    id: process_current_nest_check
+    task: process_events_details 
+    partial: 
+      df: ${{ workflow.get_events_data.return }}
+      client: ${{ workflow.er_client_name.return }}
+      map_to_titles: true 
+      ordered: true
+
+  - name: Normalize nest_check events details
+    id: normalize_nest_check
+    task: normalize_json_column
+    partial:
+      column: event_details
+      df: ${{ workflow.process_current_nest_check.return }}
+      skip_if_not_exists: true 
+      sort_columns: true 
+
+  - name: Drop column prefix from normalized nest_check details
+    id: drop_nest_check_prefix 
+    task: drop_column_prefix
+    partial: 
+      df: ${{ workflow.normalize_nest_check.return }}
+      prefix: event_details__
+      duplicate_strategy: keep_original 
+
+  - name: Process nest_id events details
+    id: process_nest_id
+    task: process_events_details 
+    partial: 
+      df: ${{ workflow.retrieve_nest_ids.return }}
+      client: ${{ workflow.er_client_name.return }}
+      map_to_titles: true
+      ordered: true
+
+  - name: Normalize nest_id events details
+    id: normalize_nest_id
+    task: normalize_json_column
+    partial:
+      column: event_details
+      df: ${{ workflow.process_nest_id.return }}
+      skip_if_not_exists: true
+      sort_columns: true
+
+  - name: Drop column prefix from normalized nest_id details
+    id: drop_nest_id_prefix
+    task: drop_column_prefix  
+    partial:
+      df: ${{ workflow.normalize_nest_id.return }}
+      prefix: event_details__
+      duplicate_strategy: keep_original
+
+  - name: Process previous nest_check events details
+    id: process_previous_nest_check
+    task: process_events_details 
+    partial: 
+      df: ${{ workflow.retrieve_previous_nest_events.return }}
+      client: ${{ workflow.er_client_name.return }}
+      map_to_titles: true 
+      ordered: true
+
+  - name: Normalize previous nest_check events details
+    id: normalize_previous_nest_check
+    task: normalize_json_column
+    partial:
+      column: event_details
+      df: ${{ workflow.process_previous_nest_check.return }}
+      skip_if_not_exists: true 
+      sort_columns: true 
+
+  - name: Drop column prefix from previous normalized nest_check details
+    id: drop_previous_nest_check_prefix 
+    task: drop_column_prefix
+    partial: 
+      df: ${{ workflow.normalize_previous_nest_check.return }}
+      prefix: event_details__
+      duplicate_strategy: keep_original 
+
+  # groupers for current shapefile
+  - name: Add spatial index to current nest_check events
+    id: add_spatial_idx_curr_nest_chk
+    task: add_spatial_index
+    partial:
+      gdf: ${{ workflow.drop_nest_check_prefix.return }}
+      groupers: ${{ workflow.resolved_groupers.return }}
+
+  - name: Restore Conservation Name column for current nest_check events
+    id: restore_current_col_nest_check
+    task: add_column_from_index_level
+    partial:
+      gdf: ${{ workflow.add_spatial_idx_curr_nest_chk.return }}
+      index_name: "SpatialGrouper_Conservation Name"
+      column_name: "Conservation Name"
+
+  - name: Add spatial index to previous nest_check events
+    id: add_spatial_idx_prev_nest_chk
+    task: add_spatial_index
+    partial:
+      gdf: ${{ workflow.drop_previous_nest_check_prefix.return }}
+      groupers: ${{ workflow.resolved_groupers.return }}
+
+  - name: Restore Conservation Name column for previous nest_check events
+    id: restore_previous_col_nest_check
+    task: add_column_from_index_level
+    partial:
+      gdf: ${{ workflow.add_spatial_idx_prev_nest_chk.return }}
+      index_name: "SpatialGrouper_Conservation Name"
+      column_name: "Conservation Name"
+
+  - name: Add spatial index to nest_id events
+    id: add_spatial_index_nest_id
+    task: add_spatial_index
+    partial:
+      gdf: ${{ workflow.drop_nest_id_prefix.return }}
+      groupers: ${{ workflow.resolved_groupers.return }}
+
+  - name: Restore Conservation Name column for nest_id events
+    id: restore_col_nest_id
+    task: add_column_from_index_level
+    partial:
+      gdf: ${{ workflow.add_spatial_index_nest_id.return }}
+      index_name: "SpatialGrouper_Conservation Name"
+      column_name: "Conservation Name"
+
+  - name: Replace Unknown Values in current nest_check events
+    id: replace_current_missing_unknown
+    task: replace_missing_with_label
+    partial:
+      df: ${{ workflow.restore_current_col_nest_check.return }}
+      columns: ["Species",]
+      label: "Unknown"
+
+  - name: Convert current nest_check Species to string 
+    id: convert_current_species_string
+    task: convert_to_string
+    partial: 
+      columns: 
+        - "Species"
+      inplace: false 
+      df: ${{ workflow.replace_current_missing_unknown.return}}
+
+  - name: Replace Unknown Values in previous nest_check events
+    id: replace_previous_missing_unknown
+    task: replace_missing_with_label
+    partial:
+      df: ${{ workflow.restore_previous_col_nest_check.return }}
+      columns: ["Species",]
+      label: "Unknown"
+
+  - name: Convert previous nest_check Species to string 
+    id: convert_previous_species_string
+    task: convert_to_string
+    partial: 
+      columns: 
+        - "Species"
+      inplace: false 
+      df: ${{ workflow.replace_previous_missing_unknown.return}}
+
+  - name: Map species columns 
+    id: map_current_species_column
+    task: map_column_value 
+    partial: 
+      df:  ${{ workflow.convert_current_species_string.return }}
+      col: "Species"
+      new_col: "Species"
+      mapping: 
+        "Bateleur": "Bateleur"
+        "Buzzard_Augur": "Augur Buzzard"
+        "Buzzard_Lizard": "Lizard Buzzard"
+        "Chanting-goshawk_Dark": "Dark chanting goshawk"
+        "Crane_Grey-crowned": "Grey crowned crane"
+        "Cuckoo-hawk_African": "African cuckoo-hawk"
+        "Eagle_Crowned": "Crowned eagle"
+        "Eagle_Long-crested": "Long-crested eagle"
+        "Eagle_Martial": "Martial eagle"
+        "Eagle_Tawny": "Tawny eagle"
+        "Eagle_Verreaux\\'s": "Verreaux\\'s eagle"
+        "Eagle_Wahlberg\\'s": "Wahlberg\\'s eagle"
+        "Eagle-owl_Spotted": "Spotted eagle owl"
+        "Eagle-owl_Verreaux\\'s": "Verreaux\\'s eagle owl"
+        "Falcon_Lanner": "Lanner falcon"
+        "Falcon_Peregrine": "Peregrine falcon"
+        "Fish-eagle_African": "African fish eagle"
+        "Fishing-owl_Pel\\'s": "Pel\\'s fishing owl"
+        "Goose_Egyptian": "Egyptian goose"
+        "Goshawk_African": "African goshawk"
+        "Goshawk_Gabar": "Gabar goshawk"
+        "Harrier-hawk_African": "African harrier hawk"
+        "Hawk_Bat": "Bat hawk"
+        "Hawk-eagle_African": "African hawk eagle"
+        "Hawk-eagle_Ayres\\'s": "Ayre\\'s hawk eagle"
+        "Hobby_African": "African hobby"
+        "Hornbill_Southern_Ground": "Southern ground hornbill"
+        "Kestrel_Grey": "Grey kestrel"
+        "Kestrel_Mountain": "Mountain kestrel"
+        "Kite_Black": "Black kite"
+        "Kite_Black-winged": "Black-winged kite"
+        "Owl_African_Wood": "African wood owl"
+        "Owl_Barn": "Barn owl"
+        "Owl_Marsh": "Marsh owl"
+        "Owl_Southern_White-faced": "Southern white-faced owl"
+        "Owlet_Pearl-spotted": "Pearl-spotted owlet"
+        "Pygmy-falcon_African": "African pygmy falcon"
+        "Scops-owl_African": "African scops owl"
+        "Secretarybird": "Secretarybird"
+        "Shikra": "Shikra"
+        "Snake-eagle_Black-chested": "Black-chested snake eagle"
+        "Snake-eagle_Brown": "Brown snake eagle"
+        "Snake-eagle_Western_Banded": "Western banded snake eagle"
+        "Sparrowhawk_Black": "Black sparrowhawk"
+        "Sparrowhawk_Little": "Little sparrowhawk"
+        "Sparrowhawk_Ovambo": "Ovambo sparrowhawk"
+        "Stork_Saddle-billed": "Saddle-billed stork"
+        "Vulture_Hooded": "Hooded vulture"
+        "Vulture_Lappet-faced": "Lappet-faced vulture"
+        "Vulture_White-backed": "White-backed vulture"
+        "Vulture_White-headed": "White-headed vulture"
+        "Others": "Others"
+        "Unknown": "Unknown"
+
+  - name: Assign colors to species
+    id: species_colors
+    task: get_color_map
+    partial: 
+      df: ${{ workflow.map_current_species_column.return }}
+      col: "Species"
+      color_dict:
+        "Bateleur": "#2E6045"
+        "Augur Buzzard": "#D86DCD"
+        "Lizard Buzzard": "#B5E6A2"
+        "Dark chanting goshawk": "#56250A"
+        "Grey crowned crane": "#72FCD1"
+        "African cuckoo-hawk": "#FFFF99"
+        "Crowned eagle": "#0AA281"
+        "Long-crested eagle": "#A6C9EC"
+        "Martial eagle": "#156082"
+        "Tawny eagle": "#9B612D"
+        "Verreaux\\'s eagle": "#C5ABB1"
+        "Wahlberg\\'s eagle": "#F98C07"
+        "Spotted eagle owl": "#3C7D22"
+        "Verreaux\\'s eagle owl": "#B81E04"
+        "Lanner falcon": "#E0A762"
+        "Peregrine falcon": "#E0A762"
+        "African fish eagle": "#FFCC00"
+        "Pel\\'s fishing owl": "#3C7D22"
+        "Egyptian goose": "#F3AC85"
+        "African goshawk": "#3292DA"
+        "Gabar goshawk": "#C0E6F5"
+        "African harrier hawk": "#5CC836"
+        "Bat hawk": "#2CE4DB"
+        "African hawk eagle": "#2CE4DB"
+        "Ayre\\'s hawk eagle": "#2CE4DB"
+        "African hobby": "#C0E6F5"
+        "Southern ground hornbill": "#FF3333"
+        "Grey kestrel": "#7F2376"
+        "Mountain kestrel": "#7F2376"
+        "Black kite": "#F0EA00"
+        "Black-winged kite": "#F0EA00"
+        "African wood owl": "#3C7D22"
+        "Barn owl": "#3C7D22"
+        "Marsh owl": "#3C7D22"
+        "Southern white-faced owl": "#3C7D22"
+        "Pearl-spotted owlet": "#3C7D22"
+        "African pygmy falcon": "#E0A762"
+        "African scops owl": "#3C7D22"
+        "Secretarybird": "#338577"
+        "Shikra": "#F7E1F5"
+        "Black-chested snake eagle": "#808080"
+        "Brown snake eagle": "#BF7823"
+        "Western banded snake eagle": "#534C15"
+        "Black sparrowhawk": "#0F9ED5"
+        "Little sparrowhawk": "#0F9ED5"
+        "Ovambo sparrowhawk": "#0F9ED5"
+        "Saddle-billed stork": "#CD3B5E"
+        "Hooded vulture": "#75DBFF"
+        "Lappet-faced vulture": "#52349E"
+        "White-backed vulture": "#DAD486"
+        "White-headed vulture": "#F35757"
+        "Others": "#FFFFFF"
+        "Unknown": "#000000"
+
+  - name: Map species to colors for nest check events
+    id: map_species_colors
+    task: custom_map_color_column_value
+    partial:
+      df: ${{ workflow.map_current_species_column.return }}
+      col: "Species"
+      mapping: ${{ workflow.species_colors.return }}
+      new_col: "species_colors"
+      default_color: "#808080"
+
+  - name: Map previous species columns 
+    id: map_previous_species_column
+    task: map_column_value 
+    partial: 
+      df:  ${{ workflow.convert_previous_species_string.return }}
+      col: "Species"
+      new_col: "Species"
+      mapping: 
+        "Bateleur": "Bateleur"
+        "Buzzard_Augur": "Augur Buzzard"
+        "Buzzard_Lizard": "Lizard Buzzard"
+        "Chanting-goshawk_Dark": "Dark chanting goshawk"
+        "Crane_Grey-crowned": "Grey crowned crane"
+        "Cuckoo-hawk_African": "African cuckoo-hawk"
+        "Eagle_Crowned": "Crowned eagle"
+        "Eagle_Long-crested": "Long-crested eagle"
+        "Eagle_Martial": "Martial eagle"
+        "Eagle_Tawny": "Tawny eagle"
+        "Eagle_Verreaux\\'s": "Verreaux\\'s eagle"
+        "Eagle_Wahlberg\\'s": "Wahlberg\\'s eagle"
+        "Eagle-owl_Spotted": "Spotted eagle owl"
+        "Eagle-owl_Verreaux\\'s": "Verreaux\\'s eagle owl"
+        "Falcon_Lanner": "Lanner falcon"
+        "Falcon_Peregrine": "Peregrine falcon"
+        "Fish-eagle_African": "African fish eagle"
+        "Fishing-owl_Pel\\'s": "Pel\\'s fishing owl"
+        "Goose_Egyptian": "Egyptian goose"
+        "Goshawk_African": "African goshawk"
+        "Goshawk_Gabar": "Gabar goshawk"
+        "Harrier-hawk_African": "African harrier hawk"
+        "Hawk_Bat": "Bat hawk"
+        "Hawk-eagle_African": "African hawk eagle"
+        "Hawk-eagle_Ayres\\'s": "Ayre\\'s hawk eagle"
+        "Hobby_African": "African hobby"
+        "Hornbill_Southern_Ground": "Southern ground hornbill"
+        "Kestrel_Grey": "Grey kestrel"
+        "Kestrel_Mountain": "Mountain kestrel"
+        "Kite_Black": "Black kite"
+        "Kite_Black-winged": "Black-winged kite"
+        "Owl_African_Wood": "African wood owl"
+        "Owl_Barn": "Barn owl"
+        "Owl_Marsh": "Marsh owl"
+        "Owl_Southern_White-faced": "Southern white-faced owl"
+        "Owlet_Pearl-spotted": "Pearl-spotted owlet"
+        "Pygmy-falcon_African": "African pygmy falcon"
+        "Scops-owl_African": "African scops owl"
+        "Secretarybird": "Secretarybird"
+        "Shikra": "Shikra"
+        "Snake-eagle_Black-chested": "Black-chested snake eagle"
+        "Snake-eagle_Brown": "Brown snake eagle"
+        "Snake-eagle_Western_Banded": "Western banded snake eagle"
+        "Sparrowhawk_Black": "Black sparrowhawk"
+        "Sparrowhawk_Little": "Little sparrowhawk"
+        "Sparrowhawk_Ovambo": "Ovambo sparrowhawk"
+        "Stork_Saddle-billed": "Saddle-billed stork"
+        "Vulture_Hooded": "Hooded vulture"
+        "Vulture_Lappet-faced": "Lappet-faced vulture"
+        "Vulture_White-backed": "White-backed vulture"
+        "Vulture_White-headed": "White-headed vulture"
+        "Others": "Others"
+        "Unknown": "Unknown"
+
+  - name: Split current nest_check events by group
+    id: split_current_nest_check
+    task: split_groups
+    partial:
+      df: ${{ workflow.map_species_colors.return }}
+      groupers: ${{ workflow.resolved_groupers.return }}
+
+  - name: Split previous nest_check events by group
+    id: split_previous_nest_check
+    task: split_groups
+    partial:
+      df: ${{ workflow.map_previous_species_column.return }}
+      groupers: ${{ workflow.resolved_groupers.return }}
+
+  - name: Split nest_id events by group
+    id: split_nest_id
+    task: split_groups
+    partial:
+      df: ${{ workflow.restore_col_nest_id.return }}
+      groupers: ${{ workflow.resolved_groupers.return }}
+  
+  - name: Get unique conservation area 
+    id: unique_conservation_area
+    task: get_first_unique_str
+    partial:
+      column_name: "Conservation Name"
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.split_current_nest_check.return }}
+  
+  - name: Compute nest cycle status for all conservancies 
+    id: compute_nest_status
+    task: compute_nest_cycle_status 
+    partial: 
+      nest_id_col: "Nest ID"
+      status_col: "Status"
+    mapvalues:
+      argnames: df 
+      argvalues: ${{ workflow.split_current_nest_check.return }}
+
+  - name: Zip computed nest status with nest check
+    id: zip_compute_stat_check
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.compute_nest_status.return }}
+        - ${{ workflow.split_current_nest_check.return }}
+
+  - name: Get active table records 
+    id: get_active_nests
+    task: get_active_nests_table 
+    partial: 
+      nest_id_col: "Nest ID"
+    mapvalues: 
+      argnames: 
+        - cycle_df 
+        - original_df 
+      argvalues: ${{ workflow.zip_compute_stat_check.return }}
+
+  - name: Remove duplicate nests by outcome
+    id: drop_active_duplicates
+    task: resolve_duplicate_nests_by_outcome
+    partial:
+      nest_id_col: "Nest ID"
+    mapvalues: 
+      argnames: df 
+      argvalues: ${{ workflow.get_active_nests.return }}
+
+  - name: Calculate nest building summary table
+    id: nest_build_summary
+    task: build_nest_summary_table
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.drop_active_duplicates.return }}
+
+  - name: Merge names for nest building summary 
+    id: merge_nest_building
+    task: merge_names
+    partial: 
+      b: "nest_building_summary_table"
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip nest building table with conservation area for persistence 
+    id: zip_nest_building
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.nest_build_summary.return }}
+        - ${{ workflow.merge_nest_building.return }}
+
+  - name: Persist nest building table as csv
+    id: persist_nest_building 
+    task: persist_df_wrapper
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes: 
+        - "csv"
+      sanitize: false 
+    mapvalues:
+      argnames: 
+        - df 
+        - filename_prefix
+
+      argvalues: ${{ workflow.zip_nest_building.return }}   
+
+  # Overall nest check for conservancies 
+  - name: Parse overall df point 
+    id: parse_overall_points 
+    task: parse_df_point
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.split_current_nest_check.return }}
+
+  - name: Sort values by nest id on overall conservancy records
+    id: sort_overall_nests
+    task: sort_values
+    partial: 
+      column_name: "Nest ID"
+      ascending: true
+      na_position: last 
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.parse_overall_points.return }}
+
+  - name: Merge name for overall conservancy nest check 
+    id: overall_conservancy_nest_check 
+    task: merge_names
+    partial: 
+      b: overall_nest_check 
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip overall nest check with conservation area for persistence
+    id: zip_nest_check_conservation
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.sort_overall_nests.return }}
+        - ${{ workflow.overall_conservancy_nest_check.return }}
+
+  - name: Persist overall nest check as csv 
+    id: persist_overall_nest_check 
+    task: persist_df_wrapper
+    partial: 
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes: 
+        - "csv"
+      sanitize: false 
+    mapvalues: 
+      argnames: 
+        - df 
+        - filename_prefix
+      argvalues: ${{ workflow.zip_nest_check_conservation.return }}
+
+  - name: Merge name for overall nest id check
+    id: merge_overall_nest_id_check
+    task: merge_names
+    partial:
+      b: overall_nest_id_check
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip overall nest id check with conservation area for persistence
+    id: zip_nest_id_check_conservation
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.split_nest_id.return }}
+        - ${{ workflow.merge_overall_nest_id_check.return }}
+
+  - name: Persist overall nest id check as csv
+    id: persist_overall_nest_id_check 
+    task: persist_df_wrapper
+    partial: 
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes: 
+        - "csv"
+      sanitize: false 
+    mapvalues: 
+      argnames: 
+        - df 
+        - filename_prefix
+      argvalues: ${{ workflow.zip_nest_id_check_conservation.return }}
+
+  # Current quarter nests 
+  - name: Current period nests 
+    id: current_period_nests
+    task: filter_by_time_range 
+    partial: 
+      time_column: "time"
+      time_range: ${{ workflow.time_range.return }}
+    mapvalues: 
+      argnames: df 
+      argvalues: ${{ workflow.split_nest_id.return }}
+
+  - name: Merge names for new nests 
+    id: merge_new_nests
+    task: merge_names
+    partial: 
+      b: "new_nests"
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip new nests with conservation area for persistence 
+    id: zip_new_nest_cons
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.current_period_nests.return }}
+        - ${{ workflow.merge_new_nests.return }}
+
+  - name: Persist new nests as csv
+    id: persist_new_nests 
+    task: persist_df_wrapper
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes:
+        - "csv"
+      sanitize: false
+    mapvalues:
+      argnames: 
+        - df
+        - filename_prefix
+      argvalues: ${{ workflow.zip_new_nest_cons.return }}
+
+  # Nest condition summary
+  - name: Aggregate nest_condition table 
+    id: nest_condition_agg 
+    task: aggregate_by
+    partial: 
+      group_col: "Condition"
+      agg_col: null
+      agg_func: "count"
+      agg_col_name: "Count"
+      add_percent: false
+      sort: null
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.split_current_nest_check.return }}
+
+  - name: Merge names for nest condition summary 
+    id: merge_nest_condition_names
+    task: merge_names
+    partial: 
+      b: "nest_condition_summary"
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip nest condition summary with conservation area for persistence 
+    id: zip_nest_condition_conservation
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.nest_condition_agg.return }}
+        - ${{ workflow.merge_nest_condition_names.return }}
+
+  - name: Persist nest condition summary
+    id: persist_nest_condition 
+    task: persist_df_wrapper
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes:
+        - "csv"
+      sanitize: false
+    mapvalues:
+      argnames: 
+        - df
+        - filename_prefix
+      argvalues: ${{ workflow.zip_nest_condition_conservation.return }}
+
+  # Inactive nests
+  - name: Get inactive nests only 
+    id: inactive_nests_only 
+    task: get_inactive_nests_table
+    partial: 
+      nest_id_col: "Nest ID"
+    mapvalues: 
+      argnames: 
+        - cycle_df 
+        - original_df 
+      argvalues: ${{ workflow.zip_compute_stat_check.return }}
+  
+  - name: Resolve inactive duplicate nests
+    id: drop_inactive_duplicates
+    task: resolve_duplicate_nests_by_outcome 
+    partial:
+      nest_id_col: "Nest ID"
+    mapvalues: 
+      argnames: df 
+      argvalues: ${{ workflow.inactive_nests_only.return }}
+
+  - name: Normalize reported_by column 
+    id: normalize_reported_by
+    task: normalize_json_column
+    partial:
+      column: "reported_by"
+      skip_if_not_exists: true 
+      sort_columns: true
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.drop_inactive_duplicates.return }}
+
+  - name: Map columns for inactive nests
+    id: map_inactive_nests_columns
+    task: map_columns
+    partial:
+      drop_columns: []
+      retain_columns: [
+        "Nest ID",
+        "reported_by__name",
+        "time",
+        "geometry"
+      ]
+      rename_columns: {
+        "reported_by__name":"Observer"
+      }
+      raise_if_not_found: true
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.normalize_reported_by.return }}
+  
+  - name: Parse inactive df point 
+    id: parse_inactive_points 
+    task: parse_df_point
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.map_inactive_nests_columns.return }}
+      
+  - name: Map parsed inactive columns for inactive nests
+    id: map_parsed_inactive_columns
+    task: map_columns
+    partial:
+      drop_columns: [
+        "geometry",
+        ]
+      retain_columns: []
+      rename_columns: {}
+      raise_if_not_found: true
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.parse_inactive_points.return }}
+
+  - name: Sort values by nest id 
+    id: sort_inactive_nests
+    task: sort_values
+    partial: 
+      column_name: "Nest ID"
+      ascending: true
+      na_position: last 
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.map_parsed_inactive_columns.return }}
+
+  - name: Merge names for inactive nests 
+    id: merge_inactive_nests_names
+    task: merge_names
+    partial: 
+      b: "inactive_nests"
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip mapped inactive nests with conservation area for persistence 
+    id: zip_mapped_inactive_conservation
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.sort_inactive_nests.return }}
+        - ${{ workflow.merge_inactive_nests_names.return }}
+
+  - name: Persist inactive nests as csv
+    id: persist_inactive_nests
+    task: persist_df_wrapper
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null
+      filetypes:
+        - "csv"
+      sanitize: false
+    mapvalues:
+      argnames: 
+        - df
+        - filename_prefix
+      argvalues: ${{ workflow.zip_mapped_inactive_conservation.return }}
+
+  - name: Merge names for focal species summary 
+    id: merge_focal_species_names
+    task: merge_names
+    partial: 
+      b: "focal_species_summary"
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip nest check and nest id data
+    id: zip_nest_check_id
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.split_current_nest_check.return }}
+        - ${{ workflow.split_nest_id.return }}
+        - ${{ workflow.merge_focal_species_names.return }}
+
+  - name: Generate focal birds species summary 
+    id: focal_species_summary 
+    task: get_focal_species_df
+    partial: 
+      focal_birds: [
+        "Augur Buzzard",
+        "Tawny eagle",
+        "Wahlberg\\'s eagle",
+        "Secretarybird",
+        "Black-chested snake eagle",
+        "Lappet-faced vulture",
+        "White-backed vulture",
+        "White-headed vulture"
+        ]
+      output_dir: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+    
+    mapvalues:
+      argnames: 
+        - nest_check_df
+        - nest_id_df
+        - filename_prefix
+      argvalues: ${{ workflow.zip_nest_check_id.return }}
+  
+  # Draw active nests map
+  - name: Parse active df point 
+    id: parse_active_points 
+    task: parse_df_point
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.drop_active_duplicates.return }}
+
+  - name: Sort values by nest id 
+    id: sort_active_nests
+    task: sort_values
+    partial: 
+      column_name: "Nest ID"
+      ascending: true
+      na_position: last 
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.parse_active_points.return }}
+
+  - name: Merge names for active nests 
+    id: merge_active_nests_names
+    task: merge_names
+    partial: 
+      b: "active_nests"
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+  
+  - name: Zip active nests with conservation area for persistence 
+    id: zip_active_nests_conservation
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.sort_active_nests.return }}
+        - ${{ workflow.merge_active_nests_names.return }}
+
+  - name: Persist active nests as csv 
+    id: persist_active_nests
+    task: persist_df_wrapper
+    skipif:
+      conditions:
+        - any_dependency_skipped
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes:
+        - "csv"
+      sanitize: false
+    mapvalues:
+      argnames: 
+        - df
+        - filename_prefix
+      argvalues: ${{ workflow.zip_active_nests_conservation.return }}
+
+  - name: Generate active nest layers
+    id: generate_active_layers
+    task: create_scatterplot_layer
+    skipif:
+      conditions:
+        - any_dependency_skipped
+    partial:
+      layer_style:
+        get_fill_color: species_colors
+        get_line_color: species_colors
+        get_radius: 2.75
+        opacity: 0.65
+        stroked: true
+      legend:
+        title: "Active Nests"
+        label_column: Species
+        color_column: species_colors
+        sort: ascending
+        label_suffix: null
+    mapvalues:
+      argnames: geodataframe
+      argvalues: ${{ workflow.drop_active_duplicates.return }}
+  
+  - name: Group all conservation area layers together 
+    id: group_conservation_area
+    task: groupbykey
+    partial:
+      iterables:
+        - ${{ workflow.unique_conservation_area.return }} 
+
+  - name: Filter polygon from kbopt gdf to draw boundaries
+    id: filter_kbopt_conservation
+    task: filter_row_values
+    partial:
+      df: ${{ workflow.filter_kbopt_aoi.return }}
+      column: "Conservation Name"
+    mapvalues:
+      argnames: values
+      argvalues: ${{ workflow.group_conservation_area.return }}
+  
+  - name: Assign geom type to filtered kbopt gdf
+    id: assign_geom_type
+    task: get_gdf_geom_type 
+    mapvalues:
+      argnames: gdf
+      argvalues: ${{ workflow.filter_kbopt_conservation.return }}
+ 
+  - name: Create boundary layer from conservation area 
+    id: boundary_layer 
+    task: create_deckgl_layer_from_gdf
+    partial: 
+      style: 
+        extruded: false
+        get_fill_color: [0, 0, 0]
+        get_line_color: [0, 0, 0]
+        get_line_width: 2.75
+        stroked: true 
+        filled: false
+        opacity: 0.40
+      legend: 
+        title: "Conservation Boundary"
+        values: 
+          - label: "Boundary"
+            color: "#000000"
+    mapvalues:
+      argnames: gdf
+      argvalues: ${{ workflow.assign_geom_type.return }}
+
+  - name: Zip active layers with boundary layers 
+    id: zip_active_boundary
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.generate_active_layers.return }}
+        - ${{ workflow.boundary_layer.return }}
+
+  - name: Combine styled boundary layer with active nest layers 
+    id: combine_styled_active_layers
+    task: custom_combine_deckgl_map_layers
+    mapvalues:
+      argnames: 
+        - grouped_layers 
+        - static_layers
+      argvalues: ${{ workflow.zip_active_boundary.return }}
+
+  - name: Zoom value to conservancy boundary
+    id: zoom_boundary
+    task: view_state_deck_gdf
+    partial:
+      pitch: 0
+      bearing: 0
+    mapvalues:
+      argnames: gdf
+      argvalues: ${{ workflow.filter_kbopt_conservation.return }}
+  
+  - name: Zip map layers with zoom value 
+    id: zip_active_zoom
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.combine_styled_active_layers.return }}
+        - ${{ workflow.zoom_boundary.return }}
+
+  - name: Draw active species nests map 
+    id: draw_active_map 
+    task: draw_map
+    partial:
+      tile_layers: ${{ workflow.configure_base_maps.return }}
+      static: false
+      title: null
+      max_zoom: 10
+      legend_style:
+        placement: "bottom-right"
+    mapvalues:
+      argnames: 
+        - geo_layers
+        - view_state
+      argvalues: ${{ workflow.zip_active_zoom.return }}
+  
+  - name: Inject logo onto html file 
+    id: inject_active_logo
+    task: inject_logo_into_html 
+    partial: 
+      logo_path: ${{ workflow.persist_kbopt_logo.return }}
+    mapvalues:
+      argnames: html_content
+      argvalues: ${{ workflow.draw_active_map.return }}
+
+  - name: Merge conservancy name to filename
+    id: merge_active_conservancy 
+    task: merge_names
+    partial: 
+      b: "active_nests_map.html"
+    mapvalues:
+      argnames: a
+      argvalues:  ${{ workflow.unique_conservation_area.return }}
+  
+  - name: Zip filename with text for active nests 
+    id: zip_active_filename_text
+    task: zip_groupbykey
+    partial: 
+      sequences: 
+        - ${{ workflow.merge_active_conservancy.return }}
+        - ${{ workflow.inject_active_logo.return }}
+
+  - name: Persist active nests map 
+    id: persist_active_map 
+    task: persist_text
+    partial: 
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: 
+      
+    mapvalues:
+      argnames: 
+        - filename
+        - text
+      argvalues: ${{ workflow.zip_active_filename_text.return }}
+
+  - name: Convert active nests map html to png 
+    id: convert_active_html_png
+    task: html_to_png
+    partial: 
+      output_dir: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      config: 
+        full_page: false 
+        device_scale_factor: 2.0 
+        wait_for_timeout: 40000
+        max_concurrent_pages: 1 
+    mapvalues:
+      argnames: html_path
+      argvalues: ${{ workflow.persist_active_map.return }}
+
+  # Draw inactive nests map
+  - name: Zip nest id  previous nest check and current nest check 
+    id: zip_nest_id_curr_check
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.split_nest_id.return }}
+        - ${{ workflow.split_previous_nest_check.return }}
+        - ${{ workflow.normalize_reported_by.return }} #${{ workflow.split_current_nest_check.return }}
+
+  - name: Build inactive nests table 
+    id: build_inactive_table 
+    task: build_inactive_nests_table 
+    partial:  
+      date_col: time 
+    mapvalues:
+      argnames: 
+        - nest_registry_df
+        - overall_nest_check_df
+        - current_nest_check_df 
+      argvalues: ${{ workflow.zip_nest_id_curr_check.return }}
+
+  - name: Parse inactive overall df point
+    id: parse_inactive_overall_points 
+    task: parse_df_point
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.build_inactive_table.return }}
+
+  - name: Merge names for overall inactives
+    id: merge_overall_inactives
+    task: merge_names
+    partial: 
+      b: "overall_inactive_summary_table"
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip overall inactives with conservation area for persistence 
+    id: zip_overall_inactives
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.parse_inactive_overall_points.return }}
+        - ${{ workflow.merge_overall_inactives.return }}
+
+  - name: Persist overall inactives table as csv
+    id: persist_overall_inactives 
+    task: persist_df_wrapper
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes: 
+        - "csv"
+      sanitize: false 
+    mapvalues:
+      argnames: 
+        - df 
+        - filename_prefix
+
+      argvalues: ${{ workflow.zip_overall_inactives.return }}   
+
+  - name: Sort values by condition precedence 
+    id: sort_inactive_by_condition 
+    task: sort_by_precedence 
+    partial:
+      column: Condition 
+      precedence: {
+        "Present": 0, 
+        "Fallen": 1, 
+        "Destroyed": 2, 
+        "Unknown": 3
+        }
+    mapvalues:
+      argnames: df 
+      argvalues: ${{ workflow.build_inactive_table.return }}
+
+  - name: Assign Color Scheme for condition
+    id: condition_colors
+    task: get_color_map
+    partial:
+      col: "Condition"
+      color_dict:
+        "Present": "#0000ff"
+        "Fallen": "#8b0000"
+        "Destroyed": "#ffff00"
+        "Unknown": "#a9a9a9"
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.sort_inactive_by_condition.return }}
+
+  - name: Zip condition colors and df 
+    id: zip_condition_df 
+    task: zip_groupbykey
+    partial: 
+      sequences: 
+        - ${{ workflow.condition_colors.return }}
+        - ${{ workflow.sort_inactive_by_condition.return }}
+
+  - name: Map condition colors to current events
+    id: map_condition_colors
+    task: map_color_column_value
+    partial:
+      col: "Condition"
+      mapping: ${{ workflow.condition_colors.return }}
+      new_col: "condition_colors"
+    mapvalues:
+      argnames: 
+        - mapping 
+        - df
+      argvalues: ${{ workflow.zip_condition_df.return }}
+
+  - name: Remove null geometry from inactive
+    id: remove_null_inactives
+    task: ecoscope_workflows_ext_custom.tasks.transformation.drop_null_geometry
+    skipif:
+      conditions:
+        - any_is_empty_df
+        - any_dependency_skipped
+    partial: 
+      geometry_column: geometry 
+    mapvalues: 
+      argnames: gdf
+      argvalues: ${{ workflow.map_condition_colors.return }}
+
+  - name: Generate inactive nest layers 
+    id: generate_inactive_layers
+    task: create_scatterplot_layer
+    partial:
+      layer_style:
+        get_fill_color: condition_colors
+        get_line_color: condition_colors
+        get_radius: 2.75
+        opacity: 0.65
+        stroked: true
+      legend:
+        title: "Inactive Nests"
+        label_column: Condition
+        color_column: condition_colors
+        sort: null 
+    mapvalues:
+      argnames: geodataframe
+      argvalues: ${{ workflow.remove_null_inactives.return }}
+
+  - name: Zip inactive layers with boundary layers 
+    id: zip_inactive_boundary
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.generate_inactive_layers.return }}
+        - ${{ workflow.boundary_layer.return }}
+
+  - name: Combine styled boundary layer with inactive nest layers 
+    id: combine_styled_inactive_layers
+    task: custom_combine_deckgl_map_layers
+    mapvalues:
+      argnames:
+        - grouped_layers 
+        - static_layers
+      argvalues: ${{ workflow.zip_inactive_boundary.return }} 
+  
+  - name: Zip map layers with zoom value 
+    id: zip_inactive_zoom
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.combine_styled_inactive_layers.return }}
+        - ${{ workflow.zoom_boundary.return }}
+
+  - name: Draw inactive species nests map
+    id: draw_inactive_map
+    task: draw_map
+    partial:
+      tile_layers: ${{ workflow.configure_base_maps.return }}
+      static: false
+      title: null
+      max_zoom: 10
+      legend_style:
+        placement: "bottom-right"
+    mapvalues:
+      argnames: 
+        - geo_layers
+        - view_state
+      argvalues: ${{ workflow.zip_inactive_zoom.return }}
+
+  - name: Inject logo onto inactive html file 
+    id: inject_inactive_logo
+    task: inject_logo_into_html 
+    partial: 
+      logo_path: ${{ workflow.persist_kbopt_logo.return }}
+    mapvalues:
+      argnames: html_content
+      argvalues: ${{ workflow.draw_inactive_map.return }}
+
+  - name: Merge conservancy name to filename
+    id: merge_inactive_conservancy 
+    task: merge_names
+    partial: 
+      b: "inactive_nests_map.html"
+    mapvalues:
+      argnames: a
+      argvalues:  ${{ workflow.unique_conservation_area.return }}
+  
+  - name: Zip filename with text for inactive nests 
+    id: zip_inactive_filename_text
+    task: zip_groupbykey
+    partial: 
+      sequences: 
+        - ${{ workflow.merge_inactive_conservancy.return }}
+        - ${{ workflow.inject_inactive_logo.return }}
+
+  - name: Persist inactive nests map
+    id: persist_inactive_map
+    task: persist_text
+    partial:  
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+    mapvalues:
+      argnames: 
+        - filename
+        - text
+      argvalues: ${{ workflow.zip_inactive_filename_text.return }}
+
+  - name: Convert inactive nests map html to png 
+    id: convert_inactive_html_png
+    task: html_to_png
+    partial: 
+      output_dir: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      config: 
+        full_page: false 
+        device_scale_factor: 2.0 
+        wait_for_timeout: 40000
+        max_concurrent_pages: 1 
+    mapvalues:
+      argnames: html_path
+      argvalues: ${{ workflow.persist_inactive_map.return }}
+
+  # Patrols observations and trajectories
+  - name: Set patrol and patrol events params 
+    id: er_patrol_and_events_params
+    task: set_patrols_and_patrol_events_params
+    partial: 
+      client: ${{ workflow.er_client_name.return }}
+      time_range: ${{ workflow.time_range.return }}
+      include_patrol_details: true 
+      raise_on_empty: false
+      truncate_to_time_range: true 
+      patrols_overlap_daterange: false
+      include_null_geometry: false
+      sub_page_size: 200
+      patrol_types: []
+      event_types: []
+      status: ["done"]
+
+  - name: Prefetch patrols 
+    id: prefetch_patrols
+    task: get_patrols_from_combined_params
+    partial: 
+      combined_params: ${{ workflow.er_patrol_and_events_params.return }}
+
+  - name: Get patrol observations
+    id: patrol_obs
+    task: get_patrol_observations_from_patrols_df_and_combined_params
+    partial:
+      patrols_df: ${{ workflow.prefetch_patrols.return }}
+      combined_params: ${{ workflow.er_patrol_and_events_params.return }}
+
+  - name: Convert patrols to timezone
+    id: convert_patrols_to_user_timezone
+    task: convert_values_to_timezone
+    partial:
+      df: ${{ workflow.patrol_obs.return }}
+      timezone: ${{ workflow.get_timezone.return }}
+      columns:
+        - patrol_start_time
+        - patrol_end_time
+        - fixtime
+
+  - title: Trajectory Category
+    type: task-group
+    description: Differentiate tracks by color using the selected category.
+    tasks:
+      - name: null
+        id: set_patrol_traj_color_column
+        task: set_string_var
+        partial:
+          var: patrol_subject 
+
+  - name: Transform Observations to Relocations
+    id: patrol_reloc
+    task: process_relocations
+    partial:
+      observations: ${{ workflow.convert_patrols_to_user_timezone.return }}
+      relocs_columns:
+        - patrol_id
+        - patrol_start_time
+        - patrol_end_time
+        - patrol_type__value
+        - patrol_type__display
+        - patrol_serial_number
+        - patrol_status
+        - patrol_subject
+        - groupby_col
+        - fixtime
+        - junk_status
+        - extra__source
+        - geometry
+      filter_point_coords:
+        - x: 180.000000
+          y: 90.000000
+        - x: 0.000000
+          y: 0.000000
+        - x: 1.000000
+          y: 1.000000
+
+  - name: Trajectory segment filter 
+    id: patrol_traj 
+    task: relocations_to_trajectory
+    partial:
+      relocations: ${{ workflow.patrol_reloc.return }}
+
+  - name: Add temporal index to patrol trajectories 
+    id: traj_add_temporal_index
+    task: add_temporal_index 
+    partial: 
+      df: ${{ workflow.patrol_traj.return }}
+      time_col: extra__patrol_start_time
+      groupers: ${{ workflow.groupers.return }}
+      cast_to_datetime: true 
+      format: mixed 
+
+  - name: Rename value grouper columns for Trajectories
+    id: traj_rename_grouper_columns
+    task: map_columns
+    partial:
+      raise_if_not_found: true
+      df: ${{ workflow.traj_add_temporal_index.return }}
+      drop_columns: []
+      retain_columns: []
+      rename_columns:
+        extra__patrol_type__value: patrol_type
+        extra__patrol_serial_number: patrol_serial_number
+        extra__patrol_status: patrol_status
+        extra__patrol_subject: patrol_subject
+        extra__patrol_id: patrol_id
+
+  - name: Add spatial index to patrol trajectories
+    id: add_spatial_index_patrol_traj
+    task: add_spatial_index
+    partial:
+      gdf: ${{ workflow.traj_rename_grouper_columns.return }}
+      groupers: ${{ workflow.resolved_groupers.return }}
+
+  - name: Restore Conservation Name column for patrol trajectories
+    id: restore_col_patrol_traj
+    task: add_column_from_index_level
+    partial:
+      gdf: ${{ workflow.add_spatial_index_patrol_traj.return }}
+      index_name: "SpatialGrouper_Conservation Name"
+      column_name: "Conservation Name"
+
+  - name: Persist patrols merged with kbopt gdf
+    id: persist_patrols_kbopt_merge
+    task: persist_df_wrapper
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: overall_merged_patrols
+      filename_prefix: null
+      filetypes: 
+        - "geoparquet"
+      sanitize: false 
+      df: ${{ workflow.restore_col_patrol_traj.return }}
+
+  - name: Split patrol trajectories by conservation area 
+    id: split_patrol_traj_conservation
+    task: split_groups
+    partial:
+      df: ${{ workflow.restore_col_patrol_traj.return }}
+      groupers: ${{ workflow.resolved_groupers.return }}
+
+  - name: Map names for patrol trajectories 
+    id: merge_patrol_traj_names
+    task: merge_names
+    partial: 
+      b: "patrol_trajectories"
+    mapvalues:
+      argnames: a
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip split patrol trajectories with conservation area for persistence 
+    id: zip_patrol_traj_conservation
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.split_patrol_traj_conservation.return }}
+        - ${{ workflow.merge_patrol_traj_names.return }}
+
+  - name: Persist patrol trajectories by conservation area 
+    id: persist_patrol_traj_conservation
+    task: persist_df_wrapper
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes: 
+        - "geoparquet"
+      sanitize: false 
+    mapvalues:
+      argnames: 
+        - df
+        - filename_prefix
+      argvalues: ${{ workflow.zip_patrol_traj_conservation.return }}
+
+  - name: Patrol trajectories colormap 
+    id: traj_colormap 
+    task: apply_color_map 
+    partial: 
+      colormap: "Dark2"
+      input_column_name: ${{ workflow.set_patrol_traj_color_column.return }}
+      output_column_name: patrol_traj_colormap
+    mapvalues:
+      argnames: df
+      argvalues:  ${{ workflow.split_patrol_traj_conservation.return }}
+
+  - name: Create patrol trajectory layers 
+    id: patrol_traj_layers 
+    task: create_path_layer
+    partial: 
+      layer_style:
+        get_color: patrol_traj_colormap
+        get_width: 1.85
+        width_scale: 1
+        width_min_pixels: 2
+        width_max_pixels: 6
+        width_units: pixels
+        cap_rounded: true 
+        joint_rounded: true
+        billboard: false
+        opacity: 0.55
+        stroked: true
+
+      legend:
+        title: "Patrol Trajectories"
+        label_column: ${{ workflow.set_patrol_traj_color_column.return }}
+        color_column: patrol_traj_colormap
+        sort: ascending
+        label_suffix: null 
+    mapvalues:
+      argnames: geodataframe
+      argvalues: ${{ workflow.traj_colormap.return }}
+
+  - name: Zip patrol trajectory layers with boundary layers 
+    id: zip_patrol_traj_boundary
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.patrol_traj_layers.return }}
+        - ${{ workflow.boundary_layer.return }}
+
+  - name: Combine styled boundary layer with patrol trajectory layers 
+    id: combine_patrol_traj_layers
+    task: custom_combine_deckgl_map_layers
+    mapvalues:
+      argnames:
+        - grouped_layers
+        - static_layers
+      argvalues: ${{ workflow.zip_patrol_traj_boundary.return }}
+
+  - name: Zoom value to patrol trajectory boundary
+    id: zoom_patrol_traj_boundary
+    task: view_state_deck_gdf
+    partial:
+      pitch: 0
+      bearing: 0
+    mapvalues:
+      argnames: gdf
+      argvalues: ${{ workflow.filter_kbopt_conservation.return }}
+
+  - name: Zip map layers with zoom value
+    id: zip_patrol_traj_zoom
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.combine_patrol_traj_layers.return }}
+        - ${{ workflow.zoom_patrol_traj_boundary.return }}
+
+  - name: Draw patrol trajectories map 
+    id: draw_patrol_traj_map
+    task: draw_map
+    partial:
+      tile_layers: ${{ workflow.configure_base_maps.return }}
+      static: false
+      title: null
+      max_zoom: 10
+      legend_style:
+        placement: "bottom-right"
+    mapvalues:
+      argnames:
+        - geo_layers
+        - view_state
+      argvalues: ${{ workflow.zip_patrol_traj_zoom.return }}
+  
+  - name: Inject logo onto patrol html file 
+    id: inject_patrols_logo
+    task: inject_logo_into_html 
+    partial: 
+      logo_path: ${{ workflow.persist_kbopt_logo.return }}
+    mapvalues:
+      argnames: html_content
+      argvalues: ${{ workflow.draw_patrol_traj_map.return }}
+
+  - name: Merge conservancy name to filename
+    id: merge_traj_conservancy 
+    task: merge_names
+    partial: 
+      b: "patrol_trajectories_map.html"
+    mapvalues:
+      argnames: a
+      argvalues:  ${{ workflow.unique_conservation_area.return }}
+  
+  - name: Zip filename with text for patrol trajectories map
+    id: zip_traj_filename_text
+    task: zip_groupbykey
+    partial: 
+      sequences: 
+        - ${{ workflow.merge_traj_conservancy.return }}
+        - ${{ workflow.inject_patrols_logo.return }}
+
+  - name: Persist patrol trajectories map 
+    id: persist_patrol_traj_map
+    task: persist_text
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+    mapvalues:
+      argnames: 
+        - filename 
+        - text
+      argvalues: ${{ workflow.zip_traj_filename_text.return }}
+
+  - name: Convert patrol trajectories map html to png 
+    id: convert_trajs_html_png
+    task: html_to_png
+    partial: 
+      output_dir: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      config: 
+        full_page: false 
+        device_scale_factor: 2.0 
+        wait_for_timeout: 40000
+        max_concurrent_pages: 1 
+    mapvalues:
+      argnames: html_path
+      argvalues: ${{ workflow.persist_patrol_traj_map.return }}
+
+  - name: Zip patrol trajectories with aoi
+    id: zip_patrol_traj_aoi
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.split_patrol_traj_conservation.return }}
+        - ${{ workflow.filter_kbopt_conservation.return }}
+
+  - name: Compute patrol visits 
+    id: patrol_grid_visits 
+    task: patrol_coverage_grid
+    partial: 
+      grid_cell_size: 1000 
+    mapvalues:
+      argnames: 
+        - trajs
+        - aoi
+      argvalues: ${{ workflow.zip_patrol_traj_aoi.return }}
+  
+  - name: Bin patrol visits with unvisited 
+    id: bin_w_unvisited 
+    task: bin_with_unvisited
+    partial: 
+      column: unique_patrol_count
+      new_column: patrol_bins 
+      n_bins: 8
+      labels: null
+      unvisited_value: 0
+      unvisited_label: "unvisited"
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.patrol_grid_visits.return }}
+  
+  - name: Apply custom bin colors 
+    id: apply_patrol_bin_colors 
+    task: apply_bin_colors
+    partial: 
+      bin_column: patrol_bins
+      new_column: patrol_bin_colors
+      unvisited_label: "unvisited"
+      unvisited_color: "#D3D3D3"
+      cmap_name: "RdYlGn_r"
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.bin_w_unvisited.return }}
+  
+  - name: Create patrol visits grid layer 
+    id: patrol_visits_layer 
+    task: create_geojson_layer 
+    partial: 
+      layer_style: 
+        filled: true 
+        stroked: true 
+        extruded: false 
+        wireframe: false
+        get_fill_color: colors
+        get_line_color: [169, 169, 169]
+        opacity: 0.11
+        get_line_width: 0.15
+        get_elevation: 0
+        get_point_radius: 1
+        line_width_units: pixels 
+        line_width_scale: 1 
+        line_width_min_pixels: 1
+        line_width_max_pixels: 5
+
+      legend:
+        title: Visits per cell
+        label_column: patrol_bins
+        color_column: colors
+    mapvalues:
+      argnames: geodataframe
+      argvalues: ${{ workflow.apply_patrol_bin_colors.return }}
+  
+  - name: Zip patrol visits layer with boundary layer 
+    id: zip_patrol_visits_boundary
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.patrol_visits_layer.return }}
+        - ${{ workflow.boundary_layer.return }}
+
+  - name: Combine styled boundary layer with patrol visits layer
+    id: combine_patrol_visits_layer
+    task: custom_combine_deckgl_map_layers
+    mapvalues:
+      argnames:
+        - grouped_layers
+        - static_layers
+      argvalues: ${{ workflow.zip_patrol_visits_boundary.return }}
+
+  - name: Zip map layers with zoom value
+    id: zip_patrol_visits_zoom
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.combine_patrol_visits_layer.return }}
+        - ${{ workflow.zoom_patrol_traj_boundary.return }}
+
+  - name: Draw patrol visits map
+    id: draw_patrol_visits_map
+    task: draw_map
+    partial:
+      tile_layers: ${{ workflow.configure_base_maps.return }}
+      static: false
+      title: null
+      max_zoom: 10
+      legend_style:
+        placement: "bottom-right"
+    mapvalues:
+      argnames:
+        - geo_layers
+        - view_state
+      argvalues: ${{ workflow.zip_patrol_visits_zoom.return }}
+
+  - name: Inject logo onto patrol visits html file 
+    id: inject_visits_logo
+    task: inject_logo_into_html 
+    partial: 
+      logo_path: ${{ workflow.persist_kbopt_logo.return }}
+    mapvalues:
+      argnames: html_content
+      argvalues: ${{ workflow.draw_patrol_visits_map.return }}
+
+  - name: Merge conservancy name to filename
+    id: merge_visits_conservancy 
+    task: merge_names
+    partial: 
+      b: "patrol_visits_map.html"
+    mapvalues:
+      argnames: a
+      argvalues:  ${{ workflow.unique_conservation_area.return }}
+  
+  - name: Zip filename with text for patrol visits
+    id: zip_visits_filename_text
+    task: zip_groupbykey
+    partial: 
+      sequences: 
+        - ${{ workflow.merge_visits_conservancy.return }}
+        - ${{ workflow.inject_visits_logo.return }}
+
+  - name: Persist patrol visits map
+    id: persist_patrol_visits_map
+    task: persist_text
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null
+    mapvalues:
+      argnames: 
+        - filename
+        - text
+      argvalues: ${{ workflow.zip_visits_filename_text.return }}
+
+  - name: Convert patrol visits map html to png 
+    id: convert_visits_html_png
+    task: html_to_png
+    partial: 
+      output_dir: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      config: 
+        full_page: false 
+        device_scale_factor: 2.0 
+        wait_for_timeout: 40000
+        max_concurrent_pages: 1 
+    mapvalues:
+      argnames: html_path
+      argvalues: ${{ workflow.persist_patrol_visits_map.return }}
+
+  # Patrol efforts summary table 
+  - name: Summarize patrol efforts by ranger
+    id: summarize_ranger_patrol
+    task: summarize_df
+    partial:  
+      groupby_cols: 
+        - patrol_subject
+      reset_index: true
+      summary_params:
+        - display_name: no_of_patrols
+          aggregator: nunique
+          column: patrol_id
+        
+        - display_name: total_distance
+          aggregator: sum 
+          column: dist_meters
+          original_unit: m
+          new_unit: km 
+        
+        - display_name: total_time
+          aggregator: sum
+          column : timespan_seconds
+          original_unit: s
+          new_unit: h
+    mapvalues:
+      argnames: df
+      argvalues: ${{ workflow.split_patrol_traj_conservation.return }}
+  
+  - name: Merge conservancy name to filename
+    id: merge_summary_conservancy
+    task: merge_names
+    partial: 
+      b: "patrol_efforts_summary"
+    mapvalues:
+      argnames: a
+      argvalues:  ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip patrol efforts summary with conservation area for persistence 
+    id: zip_patrol_effort_conservation
+    task: zip_groupbykey
+    partial:
+      sequences:
+        - ${{ workflow.summarize_ranger_patrol.return }}
+        - ${{ workflow.merge_summary_conservancy.return }}
+
+  - name: Persist patrol efforts summary
+    id: persist_patrol_effort
+    task: persist_df_wrapper
+    partial:
+      root_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      filename: null 
+      filetypes: 
+        - "csv"
+      sanitize: false
+    mapvalues:
+      argnames: 
+        - df
+        - filename_prefix
+      argvalues: ${{ workflow.zip_patrol_effort_conservation.return }}
+
+  # merge all into word doc 
+  - name: Merge conservancy name and docx to persist filename
+    id: merge_docx_names 
+    task: merge_names
+    partial: 
+      b: "overall_report.docx"
+    mapvalues:
+      argnames: a 
+      argvalues: ${{ workflow.unique_conservation_area.return }}
+
+  - name: Zip conservancy name with docx name
+    id: conservancy_docx
+    task: zip_groupbykey
+    partial: 
+      sequences:
+        - ${{ workflow.unique_conservation_area.return }}
+        - ${{ workflow.merge_docx_names.return }}
+
+  - name: Download KBOPT word template
+    id: persist_kbopt_word
+    task: fetch_and_persist_file
+    partial: 
+      url: https://www.dropbox.com/scl/fi/455zp265vce21052hvmiq/Nest-Monitoring-Report-Template.docx?rlkey=09y3qf08u9t0jhonwxfurc027&st=0cxqjlyu&dl=0
+      output_path: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      overwrite_existing: false
+      retries: 3
+      unzip: false
+
+  - name: Generate word docx for all conservancies 
+    id: word_docx_output
+    task: generate_nest_report 
+    partial: 
+      output_dir: ${{ env.ECOSCOPE_WORKFLOWS_RESULTS }}
+      template_path: ${{ workflow.persist_kbopt_word.return }}
+      time_period: ${{ workflow.time_range.return }}
+
+    mapvalues:
+      argnames: 
+        - conservancy_name 
+        - filename
+      argvalues: ${{ workflow.conservancy_docx.return }}
+
+  - name: Overall dashboard
+    id: overall_dashboard
+    task: gather_dashboard
+    partial:
+      details: ${{ workflow.workflow_details.return}}
+      widgets: []
+      time_range: ${{ workflow.time_range.return}}
+      groupers: ${{ workflow.resolved_groupers.return }}
+      
