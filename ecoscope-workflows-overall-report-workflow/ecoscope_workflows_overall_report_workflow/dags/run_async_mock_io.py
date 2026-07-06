@@ -636,7 +636,7 @@ def main(params: Params):
             )
             .set_executor("lithops"),
             partial={
-                "url": "https://www.dropbox.com/scl/fi/i476ltynyt7zimi8zb8f2/kbopt_.geoparquet?rlkey=50dmzukcqj2x5kzqjj7eyc8no&st=bfawmyer&dl=0",
+                "url": "https://www.dropbox.com/scl/fi/as1w98of99otyy58m70cq/kbopt_conservancies.geoparquet?rlkey=de7dbhhttmd9o36m8jtggbm62&st=keer0sty&dl=0",
                 "output_path": os.environ["ECOSCOPE_WORKFLOWS_RESULTS"],
                 "overwrite_existing": False,
                 "retries": 3,
@@ -729,6 +729,7 @@ def main(params: Params):
                     "Mara Triangle",
                     "Naboisho",
                     "Maasai Mara National Reserve",
+                    "Sand River Area Of Interest",
                 ],
             }
             | (params_dict.get("filter_kbopt_aoi") or {}),
